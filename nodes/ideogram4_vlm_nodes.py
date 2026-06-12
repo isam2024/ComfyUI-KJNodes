@@ -71,13 +71,14 @@ def _free_comfy_vram():
         pass
 
 
-def _get_vlm(model_path, mmproj_path, n_ctx, n_threads, n_gpu_layers):
+def _get_vlm(model_path, mmproj_path, n_ctx, n_threads, n_gpu_layers, vision_on_gpu=True):
     key = (
         os.path.abspath(model_path),
         os.path.abspath(mmproj_path),
         int(n_ctx),
         int(n_threads),
         int(n_gpu_layers),
+        bool(vision_on_gpu),
     )
     cached = _VLM_CACHE.get(key)
     if cached is not None:
@@ -94,7 +95,9 @@ def _get_vlm(model_path, mmproj_path, n_ctx, n_threads, n_gpu_layers):
         raise FileNotFoundError(f"mmproj (vision projector) GGUF not found: {mmproj_path}")
     _unload_all()
     _free_comfy_vram()
-    chat_handler = MTMDChatHandler(clip_model_path=mmproj_path, verbose=True)
+    chat_handler = MTMDChatHandler(
+        clip_model_path=mmproj_path, verbose=True, use_gpu=bool(vision_on_gpu)
+    )
     llm = Llama(
         model_path=model_path,
         chat_handler=chat_handler,
@@ -370,8 +373,13 @@ class Ideogram4ImageToJSONKJ:
                 ),
                 "max_image_side": (
                     "INT",
-                    {"default": 1024, "min": 0, "max": 4096,
-                     "tooltip": "Downscale the image's long side before encoding (0 = no downscale). Vision token count scales with resolution."},
+                    {"default": 768, "min": 0, "max": 4096,
+                     "tooltip": "Downscale the image's long side before encoding (0 = no downscale). Vision attention memory grows quadratically with resolution — 1024+ can need a ~5 GB encode buffer and OOM a 16 GB card that also holds the 7B model."},
+                ),
+                "vision_on_cpu": (
+                    "BOOLEAN",
+                    {"default": False,
+                     "tooltip": "Run the vision encoder (mmproj) on CPU. Slower per image, but avoids the large GPU encode buffer when VRAM is tight."},
                 ),
                 "unload_after_generate": (
                     "BOOLEAN",
@@ -407,7 +415,8 @@ class Ideogram4ImageToJSONKJ:
         n_ctx=8192,
         n_threads=0,
         n_gpu_layers=-1,
-        max_image_side=1024,
+        max_image_side=768,
+        vision_on_cpu=False,
         unload_after_generate=False,
     ):
         def resolve(override, name, what):
@@ -439,7 +448,10 @@ class Ideogram4ImageToJSONKJ:
             "text": extra if extra else "Deconstruct this image into the JSON.",
         })
 
-        llm = _get_vlm(model_path, mmproj_path, n_ctx, n_threads, n_gpu_layers)
+        llm = _get_vlm(
+            model_path, mmproj_path, n_ctx, n_threads, n_gpu_layers,
+            vision_on_gpu=not vision_on_cpu,
+        )
         try:
             try:
                 result = llm.create_chat_completion(
@@ -454,6 +466,20 @@ class Ideogram4ImageToJSONKJ:
                     max_tokens=int(max_tokens),
                     seed=int(seed),
                 )
+            except OSError as e:
+                # llama.cpp's mtmd helper doesn't propagate a failed CUDA allocation
+                # during image encode and dereferences null instead — the access
+                # violation surfaces here as OSError. The instance is unusable.
+                _unload_all()
+                raise RuntimeError(
+                    "The vision encoder crashed, almost certainly after running out of "
+                    "VRAM while encoding the image (check the log for 'cudaMalloc "
+                    "failed: out of memory' just above). Vision attention memory grows "
+                    "quadratically with image size. Fixes, in order: lower "
+                    "max_image_side (768 or 640), enable vision_on_cpu, enable "
+                    "unload_after_generate, or free VRAM from other apps. "
+                    f"Original error: {e}"
+                ) from e
             except ValueError as e:
                 if "mtmd" not in str(e).lower():
                     raise
