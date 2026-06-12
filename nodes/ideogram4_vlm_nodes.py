@@ -280,6 +280,60 @@ Each element:
 Deconstruct the provided image into the JSON now."""
 
 
+def _repair_truncated_caption(raw):
+    """Best-effort recovery of a grammar-enforced caption cut off by max_tokens.
+
+    The truncated prefix is structurally valid JSON (the grammar guarantees it), and
+    the schema fixes the key order: elements is the last array in the document. Scan
+    it tracking string/escape state and container depth, remember the end of each
+    complete element, cut after the last one, and close the document. Returns the
+    repaired dict or None.
+    """
+    k = raw.find('"elements"')
+    if k == -1:
+        return None
+    start = raw.find("[", k)
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    last_end = None
+    repaired = None
+    for i in range(start, len(raw)):
+        c = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c in "[{":
+            depth += 1
+        elif c in "]}":
+            depth -= 1
+            if depth == 1 and c == "}":
+                last_end = i + 1          # a complete element just closed
+            elif depth == 0:              # the elements array itself closed;
+                repaired = raw[: i + 1] + "}}"  # only the outer braces were cut
+                break
+    if repaired is None and last_end is not None:
+        repaired = raw[:last_end] + "]}}"
+    if repaired is None:
+        return None
+    try:
+        data = json.loads(repaired)
+    except json.JSONDecodeError:
+        return None
+    if not (data.get("compositional_deconstruction", {}).get("elements") or []):
+        return None
+    return data
+
+
 # Keys whose values are structural noise for the optional flattened-prompt output.
 _SKIP_FLATTEN_KEYS = {"bbox", "type", "color_palette"}
 
@@ -509,7 +563,8 @@ class Ideogram4ImageToJSONKJ:
 
         # The grammar floor makes output length a function of min_elements, so a
         # too-small max_tokens guarantees a truncated document. Auto-raise it.
-        needed_tokens = 400 + 120 * max(1, int(min_elements))
+        # Forced elements run long (max-length descs): budget ~220 tokens each.
+        needed_tokens = 700 + 220 * max(1, int(min_elements))
         eff_max_tokens = max(int(max_tokens), needed_tokens)
         if eff_max_tokens > int(max_tokens):
             print(f"[Ideogram4ImageToJSONKJ] max_tokens={int(max_tokens)} cannot fit "
@@ -574,15 +629,22 @@ class Ideogram4ImageToJSONKJ:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            # Every string and array in the schema is bounded, so the grammar forces a
-            # complete document — failure here means generation hit max_tokens early.
-            raise ValueError(
-                f"Model output was not valid JSON ({e}). It likely hit max_tokens "
-                f"({eff_max_tokens}) before the document closed — raise max_tokens, and "
-                f"check n_ctx has room for the prompt plus output (the context window "
-                f"caps generation regardless of max_tokens). "
-                f"First 200 chars: {raw[:200]!r}"
-            )
+            # Generation hit max_tokens (or the n_ctx wall) before the document
+            # closed. The grammar guarantees the prefix is structurally valid, so
+            # salvage everything up to the last complete element.
+            data = _repair_truncated_caption(raw)
+            if data is None:
+                raise ValueError(
+                    f"Model output was not valid JSON ({e}) and could not be repaired. "
+                    f"It hit max_tokens ({eff_max_tokens}) or the n_ctx wall (n_ctx="
+                    f"{int(n_ctx)}; the context window caps generation regardless of "
+                    f"max_tokens) before the first element closed — raise both. "
+                    f"First 200 chars: {raw[:200]!r}"
+                )
+            kept = len(data["compositional_deconstruction"]["elements"])
+            print(f"[Ideogram4ImageToJSONKJ] Output truncated at {eff_max_tokens} tokens "
+                  f"(or the n_ctx wall); repaired to the last complete element — kept "
+                  f"{kept}. Raise max_tokens/n_ctx or lower min_elements to avoid this.")
         data = _rescale_bboxes(data, img_w, img_h)
         pretty = json.dumps(data, indent=2, ensure_ascii=False)
         return (pretty, _flatten_to_prompt(data))
