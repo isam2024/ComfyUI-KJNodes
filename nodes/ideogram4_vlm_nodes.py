@@ -216,7 +216,7 @@ Array with at least 1 item, listed roughly background-to-foreground.
 Each element:
 
 - `type` (string): Always "obj".
-- `bbox` (array of 4 integers): [x_min, y_min, x_max, y_max] of the element's location IN THE IMAGE, mapped onto a 1000×1000 canvas with origin at the top-left, x increasing rightward, y increasing downward. To map: divide the pixel coordinate by the image's width (for x) or height (for y) and multiply by 1000. Must satisfy 0 ≤ x_min < x_max ≤ 1000 and 0 ≤ y_min < y_max ≤ 1000. Make the box tight around the visible element.
+- `bbox` (array of 4 integers): [x_min, y_min, x_max, y_max] of the element's location in PIXEL COORDINATES of the image, with origin at the top-left, x increasing rightward, y increasing downward. Make the box tight around the visible element. Report the pixels exactly as you see them — coordinates are rescaled automatically afterward.
 - `desc` (string): **30–60 words, 60-word HARD CAP.** Identity FIRST (a standalone catalog entry — open with what the thing is, not "the X"), then major attributes briefly (people: skin tone, hair, each garment + color, expression, pose; objects: shape, material, color, distinctive parts), then one distinguishing detail. **One subject = one element** — anatomical/structural parts go in that element's desc, never as separate elements. Do NOT include: camera/render language (DoF, bokeh, focus, grain, lens flare); shadow language (scene-wide shadows go in `background`); metaphor/impression words (luminous, radiant, vibrant, lush, stunning, breathtaking) — use observable properties instead. Do not restate global background or style information.
 - `color_palette` (array of strings): 2–5 dominant colors of THIS element as uppercase hex codes in #RRGGBB form, estimated from the actual pixels.
 
@@ -259,7 +259,7 @@ def _flatten_to_prompt(data):
 
 
 def _image_to_data_uri(image, max_side):
-    """ComfyUI IMAGE tensor (B,H,W,C float 0..1) -> PNG data URI of the first frame."""
+    """ComfyUI IMAGE tensor (B,H,W,C float 0..1) -> (PNG data URI, (w, h)) of the first frame."""
     from PIL import Image
 
     frame = image[0] if image.ndim == 4 else image
@@ -272,7 +272,26 @@ def _image_to_data_uri(image, max_side):
     buf = io.BytesIO()
     pil.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return "data:image/png;base64," + b64
+    return "data:image/png;base64," + b64, pil.size
+
+
+def _rescale_bboxes(data, img_w, img_h):
+    """Map model bboxes from sent-image pixel coordinates onto the 1000x1000 canvas.
+
+    VLMs ground boxes in pixels far more accurately than they do arithmetic, so the
+    system prompt asks for pixel coordinates and the mapping happens here, where the
+    sent dimensions are known exactly. Degenerate/out-of-range boxes are repaired.
+    """
+    for el in data.get("compositional_deconstruction", {}).get("elements", []):
+        x0, y0, x1, y1 = el["bbox"][:4]
+        x0, x1 = sorted((round(x0 * 1000 / img_w), round(x1 * 1000 / img_w)))
+        y0, y1 = sorted((round(y0 * 1000 / img_h), round(y1 * 1000 / img_h)))
+        x0 = min(max(x0, 0), 999)
+        y0 = min(max(y0, 0), 999)
+        x1 = min(max(x1, x0 + 1), 1000)
+        y1 = min(max(y1, y0 + 1), 1000)
+        el["bbox"] = [x0, y0, x1, y1]
+    return data
 
 
 class Ideogram4ImageToJSONKJ:
@@ -383,7 +402,7 @@ class Ideogram4ImageToJSONKJ:
                 "model GGUF and its separate mmproj (vision projector) GGUF."
             )
 
-        data_uri = _image_to_data_uri(image, int(max_image_side))
+        data_uri, (img_w, img_h) = _image_to_data_uri(image, int(max_image_side))
 
         user_content = [{"type": "image_url", "image_url": {"url": data_uri}}]
         extra = instructions.strip()
@@ -421,5 +440,6 @@ class Ideogram4ImageToJSONKJ:
                 f"({int(max_tokens)}) before the document closed — raise max_tokens. "
                 f"First 200 chars: {raw[:200]!r}"
             )
+        data = _rescale_bboxes(data, img_w, img_h)
         pretty = json.dumps(data, indent=2, ensure_ascii=False)
         return (pretty, _flatten_to_prompt(data))
