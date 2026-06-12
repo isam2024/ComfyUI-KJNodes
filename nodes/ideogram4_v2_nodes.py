@@ -499,8 +499,12 @@ the canvas aspect ratio.""",
                 io.Image.Input("image", optional=True,
                                tooltip="Optional reference image shown as the editor background (and behind the preview)."),
                 io.String.Input("import_json", default="", optional=True, force_input=True,
-                                tooltip="Optional: a full caption JSON. When connected, it loads into the "
-                                        "editor on run; the output always reflects the editor, never the raw input."),
+                                tooltip="Optional: a full caption JSON. When connected, it loads into the editor "
+                                        "and drives the output per 'import_mode'."),
+                io.Combo.Input("import_mode", options=["when empty", "always"], default="when empty",
+                               tooltip="How a wired import_json is used: 'when empty' only seeds the editor while "
+                                       "it has no regions (then the editor wins, so you can edit); 'always' makes "
+                                       "the wired JSON authoritative so its changes always propagate to the output."),
                 io.String.Input("style_palette_data", default="", socketless=True, advanced=True,
                                 tooltip="Serialized style color palette from the editor (managed by the node UI)."),
                 io.String.Input("elements_data", default="", socketless=True, advanced=True,
@@ -525,9 +529,33 @@ the canvas aspect ratio.""",
     def execute(cls, width, height, background, style,
                 high_level_description="", aesthetics="", lighting="", medium="",
                 style_palette_data="", elements_data="", draw_data="", import_json="",
-                image=None, bg_brightness=25, bg_opacity=100) -> io.NodeOutput:
+                import_mode="when empty", image=None, bg_brightness=25, bg_opacity=100) -> io.NodeOutput:
+        if import_mode not in ("when empty", "always"):      # old workflows saved before this widget existed
+            import_mode = "when empty"
         boxes = _parse_json_list(elements_data)
         draw_ops = _parse_json_list(draw_data)
+
+        imported = None
+        if import_json and import_json.strip():
+            try:
+                c = json.loads(import_json)
+                if isinstance(c, dict):
+                    imported = c
+            except json.JSONDecodeError:
+                pass
+
+        # Same semantics as V1: "always" -> the wired JSON is authoritative and its
+        # changes always propagate to the output (no one-run editor lag); "when empty"
+        # -> only seed the editor while it has no regions, then the editor wins.
+        used_import = imported is not None and (import_mode == "always" or not boxes)
+
+        if used_import:
+            from .ideogram4_nodes import _caption_to_boxes
+            caption = imported
+            boxes = _caption_to_boxes(imported)
+            draw_ops = []                                    # editor ink belongs to the replaced state
+            return cls._finish(caption, boxes, draw_ops, width, height, image,
+                               bg_brightness, bg_opacity, imported)
 
         caption = {}
         if high_level_description.strip():
@@ -570,6 +598,12 @@ the canvas aspect ratio.""",
             "background": background,
             "elements": elements,
         }
+        return cls._finish(caption, boxes, draw_ops, width, height, image,
+                           bg_brightness, bg_opacity, imported=None)
+
+    @classmethod
+    def _finish(cls, caption, boxes, draw_ops, width, height, image,
+                bg_brightness, bg_opacity, imported=None):
         bg = None
         if image is not None:
             try:
@@ -598,13 +632,8 @@ the canvas aspect ratio.""",
         bboxes_out = [bbox_dicts] if bbox_dicts else []
 
         # ui: send the resolved width/height so the editor canvas can follow connected
-        # inputs; import_json (if wired) loads into the editor (output reflects editor only).
+        # inputs; mirror the wired import in the editor only when it was actually used.
         ui = {"dims": [width, height]}
-        if import_json and import_json.strip():
-            try:
-                cap = json.loads(import_json)
-                if isinstance(cap, dict):
-                    ui["caption"] = [_dumps(cap)]
-            except json.JSONDecodeError:
-                pass
+        if imported is not None:
+            ui["caption"] = [_dumps(imported)]
         return io.NodeOutput(_dumps(caption), preview, bboxes_out, width, height, ui=ui)
