@@ -48,6 +48,16 @@ _VLM_CACHE = {}
 
 def _unload_all():
     for llm in _VLM_CACHE.values():
+        # MTMDChatHandler registers mtmd_free on an ExitStack but has no close()
+        # or __del__, and llm.close() never touches the handler — without this the
+        # vision tower leaks GPU memory on every unload/reload cycle.
+        handler = getattr(llm, "chat_handler", None)
+        try:
+            if handler is not None and getattr(handler, "_exit_stack", None) is not None:
+                handler._exit_stack.close()
+                handler.mtmd_ctx = None
+        except Exception:
+            pass
         try:
             llm.close()
         except Exception:
@@ -450,6 +460,10 @@ class Ideogram4ImageToJSONKJ:
             "text": extra if extra else "Deconstruct this image into the JSON.",
         })
 
+        # Always evict ComfyUI-managed models first — the vision encode buffer is
+        # allocated per image, so even a cached VLM collides with diffusion models
+        # loaded by a render since the last call.
+        _free_comfy_vram()
         llm = _get_vlm(
             model_path, mmproj_path, n_ctx, n_threads, n_gpu_layers,
             vision_on_gpu=not vision_on_cpu,
