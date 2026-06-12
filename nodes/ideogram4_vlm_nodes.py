@@ -306,13 +306,20 @@ class Ideogram4ImageToJSONKJ:
                 gguf_files = []
         else:
             gguf_files = []
-        model_choices = gguf_files if gguf_files else ["<put a .gguf in models/llm_gguf>"]
+        # Split the folder into projector files and model files so the two dropdowns
+        # can't default to the same file. Falls back to the full list if the naming
+        # convention doesn't match.
+        mmproj_files = [f for f in gguf_files if "mmproj" in os.path.basename(f).lower()]
+        model_files = [f for f in gguf_files if f not in mmproj_files]
+        placeholder = ["<put a .gguf in models/llm_gguf>"]
+        model_choices = model_files or gguf_files or placeholder
+        mmproj_choices = mmproj_files or gguf_files or placeholder
 
         return {
             "required": {
                 "image": ("IMAGE",),
                 "model_name": (model_choices, {"tooltip": "Vision-capable GGUF (e.g. Qwen2.5-VL Instruct)"}),
-                "mmproj_name": (model_choices, {"tooltip": "Matching mmproj (vision projector) GGUF for the model"}),
+                "mmproj_name": (mmproj_choices, {"tooltip": "Matching mmproj (vision projector) GGUF for the model"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "temperature": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "max_tokens": ("INT", {"default": 2048, "min": 64, "max": 8192}),
