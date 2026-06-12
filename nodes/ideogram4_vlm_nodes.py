@@ -507,6 +507,14 @@ class Ideogram4ImageToJSONKJ:
             user_text += f" Your element budget is {int(max_elements)} elements."
         user_content.append({"type": "text", "text": user_text})
 
+        # The grammar floor makes output length a function of min_elements, so a
+        # too-small max_tokens guarantees a truncated document. Auto-raise it.
+        needed_tokens = 400 + 120 * max(1, int(min_elements))
+        eff_max_tokens = max(int(max_tokens), needed_tokens)
+        if eff_max_tokens > int(max_tokens):
+            print(f"[Ideogram4ImageToJSONKJ] max_tokens={int(max_tokens)} cannot fit "
+                  f"min_elements={int(min_elements)} (~120 tokens each); using {eff_max_tokens}.")
+
         # Always evict ComfyUI-managed models first — the vision encode buffer is
         # allocated per image, so even a cached VLM collides with diffusion models
         # loaded by a render since the last call.
@@ -527,7 +535,7 @@ class Ideogram4ImageToJSONKJ:
                     response_format={"type": "json_object",
                                      "schema": _schema_with_bounds(min_elements, max_elements)},
                     temperature=float(temperature),
-                    max_tokens=int(max_tokens),
+                    max_tokens=eff_max_tokens,
                     seed=int(seed),
                 )
             except OSError as e:
@@ -570,7 +578,9 @@ class Ideogram4ImageToJSONKJ:
             # complete document — failure here means generation hit max_tokens early.
             raise ValueError(
                 f"Model output was not valid JSON ({e}). It likely hit max_tokens "
-                f"({int(max_tokens)}) before the document closed — raise max_tokens. "
+                f"({eff_max_tokens}) before the document closed — raise max_tokens, and "
+                f"check n_ctx has room for the prompt plus output (the context window "
+                f"caps generation regardless of max_tokens). "
                 f"First 200 chars: {raw[:200]!r}"
             )
         data = _rescale_bboxes(data, img_w, img_h)
