@@ -186,6 +186,22 @@ SCENE_COMPOSITION_SCHEMA = {
 }
 
 
+def _schema_with_bounds(min_elements, max_elements):
+    """Clone the schema with the element-count bounds baked in.
+
+    The bounds become part of the compiled grammar, so the model is FORCED to emit
+    at least min_elements — the array literally cannot close earlier. This is the
+    reliable lever against lazy single-element summaries (e.g. of collages).
+    """
+    schema = json.loads(json.dumps(SCENE_COMPOSITION_SCHEMA))
+    elements = schema["properties"]["compositional_deconstruction"]["properties"]["elements"]
+    lo = max(1, min(int(min_elements), 8))
+    hi = max(lo, min(int(max_elements), 8))
+    elements["minItems"] = lo
+    elements["maxItems"] = hi
+    return schema
+
+
 DEFAULT_SYSTEM_PROMPT = """You are a scene deconstruction assistant. You are shown an image. You output a single JSON document that describes that image in a structured, render-ready form. You output JSON only — no prose, no markdown fences, no commentary. Describe only what is actually visible in the image; never invent objects, text, or details that are not there.
 
 # Output format
@@ -241,6 +257,9 @@ A flat object describing how the image is rendered, independent of what it depic
 ## compositional_deconstruction.elements
 
 Array with at least 1 item, listed roughly background-to-foreground.
+
+- Identify each distinct subject as its OWN element; prefer 3–8 elements for typical scenes. A single element is only correct when the image truly contains exactly one subject on a background.
+- If the image is a collage, grid, contact sheet, or multi-panel layout, output one element PER PANEL (each with that panel's own bbox), merging only the least distinct panels if there are more than 8. NEVER summarize a multi-subject image as one element whose bbox spans the whole canvas.
 
 Each element:
 
@@ -398,6 +417,16 @@ class Ideogram4ImageToJSONKJ:
                     {"default": False,
                      "tooltip": "Free the VLM from VRAM after each generation. llama.cpp memory is NOT visible to ComfyUI's memory management and survives its unload button — enable this when running close to the VRAM limit."},
                 ),
+                # New widgets are appended at the END only: ComfyUI saves workflow
+                # widget values by position, and inserting mid-list shifts every
+                # later value into the wrong widget on existing workflows.
+                "min_elements": (
+                    "INT",
+                    {"default": 1, "min": 1, "max": 8,
+                     "tooltip": "Grammar-enforced minimum element count — the model cannot emit fewer. "
+                                "Raise for collages/grids that the model lazily summarizes as one element."},
+                ),
+                "max_elements": ("INT", {"default": 8, "min": 1, "max": 8}),
             },
         }
 
@@ -420,6 +449,8 @@ class Ideogram4ImageToJSONKJ:
         seed,
         temperature,
         max_tokens,
+        min_elements=1,
+        max_elements=8,
         instructions="",
         system_prompt=DEFAULT_SYSTEM_PROMPT,
         model_path_override="",
@@ -477,7 +508,8 @@ class Ideogram4ImageToJSONKJ:
                 ],
                 # Schema -> token-level grammar: structure, key set, hex pattern and
                 # bbox arity are enforced during sampling. Malformed JSON is impossible.
-                    response_format={"type": "json_object", "schema": SCENE_COMPOSITION_SCHEMA},
+                    response_format={"type": "json_object",
+                                     "schema": _schema_with_bounds(min_elements, max_elements)},
                     temperature=float(temperature),
                     max_tokens=int(max_tokens),
                     seed=int(seed),
