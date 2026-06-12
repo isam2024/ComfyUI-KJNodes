@@ -486,10 +486,16 @@ class Ideogram4ImageToJSONKJ:
 
         user_content = [{"type": "image_url", "image_url": {"url": data_uri}}]
         extra = instructions.strip()
-        user_content.append({
-            "type": "text",
-            "text": extra if extra else "Deconstruct this image into the JSON.",
-        })
+        user_text = extra if extra else "Deconstruct this image into the JSON."
+        if int(min_elements) > 1:
+            # The grammar already forces the count; saying it up front lets the model
+            # plan N regions instead of being cornered into filler mid-generation.
+            user_text += (
+                f" You MUST identify at least {int(min_elements)} distinct subjects or "
+                "panels, each as its own element with its own tight bbox covering only "
+                "that subject — do not reuse the same bbox or describe the image as a whole."
+            )
+        user_content.append({"type": "text", "text": user_text})
 
         # Always evict ComfyUI-managed models first — the vision encode buffer is
         # allocated per image, so even a cached VLM collides with diffusion models
