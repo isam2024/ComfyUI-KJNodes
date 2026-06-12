@@ -56,6 +56,21 @@ def _unload_all():
     gc.collect()
 
 
+def _free_comfy_vram():
+    """Ask ComfyUI to release its model VRAM before llama.cpp allocates.
+
+    The VLM (model + KV cache + mmproj vision tower) needs ~7.5 GB that ComfyUI's
+    memory management can't see, so loading while diffusion models are resident
+    fails inside mtmd with an opaque 'Failed to load mtmd context' error.
+    """
+    try:
+        import comfy.model_management as mm
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+    except Exception:
+        pass
+
+
 def _get_vlm(model_path, mmproj_path, n_ctx, n_threads, n_gpu_layers):
     key = (
         os.path.abspath(model_path),
@@ -78,6 +93,7 @@ def _get_vlm(model_path, mmproj_path, n_ctx, n_threads, n_gpu_layers):
     if not os.path.isfile(mmproj_path):
         raise FileNotFoundError(f"mmproj (vision projector) GGUF not found: {mmproj_path}")
     _unload_all()
+    _free_comfy_vram()
     chat_handler = MTMDChatHandler(clip_model_path=mmproj_path, verbose=True)
     llm = Llama(
         model_path=model_path,
@@ -311,6 +327,11 @@ class Ideogram4ImageToJSONKJ:
         # convention doesn't match.
         mmproj_files = [f for f in gguf_files if "mmproj" in os.path.basename(f).lower()]
         model_files = [f for f in gguf_files if f not in mmproj_files]
+        # Vision-capable models first so the widget default isn't a text-only LLM,
+        # which mtmd rejects with an opaque "Failed to load mtmd context" error.
+        model_files.sort(key=lambda f: (not any(
+            tag in os.path.basename(f).lower() for tag in ("vl", "vision", "llava", "minicpm-v")
+        ), os.path.basename(f).lower()))
         placeholder = ["<put a .gguf in models/llm_gguf>"]
         model_choices = model_files or gguf_files or placeholder
         mmproj_choices = mmproj_files or gguf_files or placeholder
@@ -420,18 +441,33 @@ class Ideogram4ImageToJSONKJ:
 
         llm = _get_vlm(model_path, mmproj_path, n_ctx, n_threads, n_gpu_layers)
         try:
-            result = llm.create_chat_completion(
+            try:
+                result = llm.create_chat_completion(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
                 # Schema -> token-level grammar: structure, key set, hex pattern and
                 # bbox arity are enforced during sampling. Malformed JSON is impossible.
-                response_format={"type": "json_object", "schema": SCENE_COMPOSITION_SCHEMA},
-                temperature=float(temperature),
-                max_tokens=int(max_tokens),
-                seed=int(seed),
-            )
+                    response_format={"type": "json_object", "schema": SCENE_COMPOSITION_SCHEMA},
+                    temperature=float(temperature),
+                    max_tokens=int(max_tokens),
+                    seed=int(seed),
+                )
+            except ValueError as e:
+                if "mtmd" not in str(e).lower():
+                    raise
+                arch = (llm.metadata or {}).get("general.architecture", "unknown")
+                name = (llm.metadata or {}).get("general.name", os.path.basename(model_path))
+                _unload_all()  # the pair is unusable; don't leave it resident
+                raise ValueError(
+                    f"The vision projector could not attach to the selected model "
+                    f"'{name}' (architecture: {arch}). This usually means model_name is a "
+                    f"text-only LLM or doesn't match the mmproj — select the vision model "
+                    f"the mmproj belongs to (e.g. Qwen2.5-VL-*-Instruct with its own "
+                    f"mmproj file). If the pair is correct, the load may have run out of "
+                    f"VRAM. Original error: {e}"
+                ) from e
         finally:
             if unload_after_generate:
                 _unload_all()
