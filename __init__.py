@@ -370,6 +370,14 @@ try:
 except Exception:
     logging.warning("KJNodes: PatchTritonVAE node could not be imported. PatchTritonVAE will be unavailable.", exc_info=True)
 
+try:
+    from .nodes.ideogram4_vlm_nodes import Ideogram4ImageToJSONKJ
+    NODE_CONFIG.update({
+        "Ideogram4ImageToJSONKJ": {"class": Ideogram4ImageToJSONKJ, "name": "Ideogram 4 Image To JSON (VLM) KJ"},
+    })
+except Exception:
+    logging.warning("KJNodes: Ideogram4ImageToJSONKJ could not be imported (needs llama-cpp-python). It will be unavailable.", exc_info=True)
+
 def generate_node_mappings(node_config):
     node_class_mappings = {}
     node_display_name_mappings = {}
