@@ -195,8 +195,8 @@ def _schema_with_bounds(min_elements, max_elements):
     """
     schema = json.loads(json.dumps(SCENE_COMPOSITION_SCHEMA))
     elements = schema["properties"]["compositional_deconstruction"]["properties"]["elements"]
-    lo = max(1, min(int(min_elements), 8))
-    hi = max(lo, min(int(max_elements), 8))
+    lo = max(1, min(int(min_elements), 64))
+    hi = max(lo, min(int(max_elements), 64))
     elements["minItems"] = lo
     elements["maxItems"] = hi
     return schema
@@ -259,7 +259,7 @@ A flat object describing how the image is rendered, independent of what it depic
 Array with at least 1 item, listed roughly background-to-foreground.
 
 - Identify each distinct subject as its OWN element; prefer 3–8 elements for typical scenes. A single element is only correct when the image truly contains exactly one subject on a background.
-- If the image is a collage, grid, contact sheet, or multi-panel layout, output one element PER PANEL (each with that panel's own bbox), merging only the least distinct panels if there are more than 8. NEVER summarize a multi-subject image as one element whose bbox spans the whole canvas.
+- If the image is a collage, grid, contact sheet, or multi-panel layout, output one element PER PANEL (each with that panel's own bbox), merging only the least distinct panels if there are more panels than the element budget. NEVER summarize a multi-subject image as one element whose bbox spans the whole canvas.
 
 Each element:
 
@@ -377,7 +377,9 @@ class Ideogram4ImageToJSONKJ:
                 "mmproj_name": (mmproj_choices, {"tooltip": "Matching mmproj (vision projector) GGUF for the model"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "temperature": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "max_tokens": ("INT", {"default": 2048, "min": 64, "max": 8192}),
+                "max_tokens": ("INT", {"default": 2048, "min": 64, "max": 16384,
+                                       "tooltip": "Budget ~100 tokens per element plus ~300 overhead — raise this "
+                                                  "(and n_ctx) when raising max_elements."}),
             },
             "optional": {
                 "instructions": (
@@ -422,11 +424,17 @@ class Ideogram4ImageToJSONKJ:
                 # later value into the wrong widget on existing workflows.
                 "min_elements": (
                     "INT",
-                    {"default": 1, "min": 1, "max": 8,
+                    {"default": 1, "min": 1, "max": 64,
                      "tooltip": "Grammar-enforced minimum element count — the model cannot emit fewer. "
                                 "Raise for collages/grids that the model lazily summarizes as one element."},
                 ),
-                "max_elements": ("INT", {"default": 8, "min": 1, "max": 8}),
+                "max_elements": (
+                    "INT",
+                    {"default": 8, "min": 1, "max": 64,
+                     "tooltip": "Element budget for the whole caption. Ideogram 4 guidance prefers 3-8; beyond that "
+                                "expect token bloat and weaker per-region adherence. High counts need max_tokens "
+                                "and n_ctx headroom (~100 output tokens per element)."},
+                ),
             },
         }
 
@@ -495,6 +503,8 @@ class Ideogram4ImageToJSONKJ:
                 "panels, each as its own element with its own tight bbox covering only "
                 "that subject — do not reuse the same bbox or describe the image as a whole."
             )
+        if int(max_elements) != 8:
+            user_text += f" Your element budget is {int(max_elements)} elements."
         user_content.append({"type": "text", "text": user_text})
 
         # Always evict ComfyUI-managed models first — the vision encode buffer is
