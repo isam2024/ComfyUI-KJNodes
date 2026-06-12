@@ -297,9 +297,11 @@ def _image_to_data_uri(image, max_side):
 def _rescale_bboxes(data, img_w, img_h):
     """Map model bboxes from sent-image pixel coordinates onto the 1000x1000 canvas.
 
-    VLMs ground boxes in pixels far more accurately than they do arithmetic, so the
-    system prompt asks for pixel coordinates and the mapping happens here, where the
-    sent dimensions are known exactly. Degenerate/out-of-range boxes are repaired.
+    VLMs ground boxes in pixels (x-first) far more accurately than they do arithmetic,
+    so the system prompt asks for [x_min, y_min, x_max, y_max] pixel coordinates and
+    the mapping happens here, where the sent dimensions are known exactly. The output
+    order is Ideogram 4's canonical [ymin, xmin, ymax, xmax] (matching the Prompt
+    Builder's exporter). Degenerate/out-of-range boxes are repaired.
     """
     for el in data.get("compositional_deconstruction", {}).get("elements", []):
         x0, y0, x1, y1 = el["bbox"][:4]
@@ -309,7 +311,7 @@ def _rescale_bboxes(data, img_w, img_h):
         y0 = min(max(y0, 0), 999)
         x1 = min(max(x1, x0 + 1), 1000)
         y1 = min(max(y1, y0 + 1), 1000)
-        el["bbox"] = [x0, y0, x1, y1]
+        el["bbox"] = [y0, x0, y1, x1]
     return data
 
 
