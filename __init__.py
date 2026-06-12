@@ -378,6 +378,14 @@ try:
 except Exception:
     logging.warning("KJNodes: Ideogram4ImageToJSONKJ could not be imported (needs llama-cpp-python). It will be unavailable.", exc_info=True)
 
+try:
+    from .nodes.ideogram4_random_nodes import Ideogram4CaptionRerollKJ
+    NODE_CONFIG.update({
+        "Ideogram4CaptionRerollKJ": {"class": Ideogram4CaptionRerollKJ, "name": "Ideogram 4 Caption Reroller KJ"},
+    })
+except Exception:
+    logging.warning("KJNodes: Ideogram4CaptionRerollKJ could not be imported. It will be unavailable.", exc_info=True)
+
 def generate_node_mappings(node_config):
     node_class_mappings = {}
     node_display_name_mappings = {}
